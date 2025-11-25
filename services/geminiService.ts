@@ -1,111 +1,101 @@
-import { GoogleGenAI, Type, Schema } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { RoomAnalysis, GeminiContent } from "../types";
 
-// Инициализация клиента. Ключ должен быть в переменных окружения.
-const apiKey = process.env.API_KEY;
+// Используем import.meta.env для Vite
+const apiKey = import.meta.env.VITE_API_KEY;
+
 if (!apiKey) {
-  console.error("API_KEY is missing from environment variables.");
+  console.error("❌ VITE_API_KEY не найден! Проверь файл .env");
 }
 
 const ai = new GoogleGenAI({ apiKey: apiKey || 'dummy-key' });
 
-// Используем модель gemini-3-pro-preview для наилучшего понимания изображений и сложных инструкций
-const MODEL_NAME = 'gemini-3-pro-preview';
+// Модель gemini-2.0-flash - самая новая и бесплатная
+const MODEL_NAME = 'gemini-2.0-flash';
 
-// Строгая схема JSON для ответа модели.
-// Мы используем это, чтобы гарантировать, что ответ придет в нужном формате для рендеринга UI.
-const analysisSchema: Schema = {
-  type: Type.OBJECT,
-  properties: {
-    roomType: { type: Type.STRING, description: "Тип комнаты (одно-два слова на русском)" },
-    clutterLevel: { type: Type.INTEGER, description: "Число от 0 до 100" },
-    summary: { type: Type.STRING, description: "Краткое резюме на русском (максимум 2 предложения)" },
-    spaceUtilization: {
-      type: Type.ARRAY,
-      description: "Статистика для графика",
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          name: { type: Type.STRING, description: "Категория на русском (Мебель, Пол, Хлам)" },
-          value: { type: Type.INTEGER }
-        }
-      }
-    },
-    actionItems: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          id: { type: Type.STRING },
-          title: { type: Type.STRING, description: "Короткий заголовок действия на русском" },
-          description: { type: Type.STRING, description: "Четкая инструкция на русском без лишних слов" },
-          difficulty: { type: Type.STRING, enum: ["Easy", "Medium", "Hard"] },
-          category: { type: Type.STRING, enum: ["Discard", "Organize", "Buy"] }
-        }
-      }
-    },
-    aestheticSuggestions: {
-      type: Type.ARRAY,
-      items: { type: Type.STRING, description: "Совет по дизайну на русском" }
-    }
-  },
-  required: ["roomType", "clutterLevel", "summary", "actionItems", "aestheticSuggestions", "spaceUtilization"]
-};
-
-// Функция очистки текста от артефактов модели.
-// Иногда модель, несмотря на инструкции, добавляет английские переводы в скобках или примечания.
+// Функция очистки текста от артефактов модели
 const cleanText = (text: string): string => {
   if (!text) return "";
   let cleaned = text;
 
-  // Удаляем содержимое в скобках, если это похоже на английский перевод или технические заметки
-  // Например: "(Mug and Pitcher)" или "(Note: ...)"
   cleaned = cleaned.replace(/\([A-Za-z\s&:\-.]+\)/g, "");
-
-  // Удаляем префиксы типа "Description:", "Translation:", "Context:", которые модель любит добавлять
   cleaned = cleaned.replace(/^(Description|Translation|Context|Note|Analysis):/i, "");
-  
-  // Удаляем Markdown жирный шрифт
   cleaned = cleaned.replace(/\*\*/g, "");
-
-  // Удаляем внутренний монолог модели, если он просочился (начинается с Wait, ...)
   cleaned = cleaned.replace(/Wait,.*$/i, "");
   
   return cleaned.trim();
 };
 
+// Извлечение JSON из ответа модели
+const extractJSON = (text: string): string => {
+  // Убираем markdown code blocks
+  let cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+  // Находим JSON объект
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  return match ? match[0] : cleaned;
+};
+
 export const analyzeRoomImage = async (base64Image: string): Promise<RoomAnalysis> => {
+  if (!apiKey) throw new Error("API Key is missing");
+
   try {
+    const prompt = `Ты профессиональный организатор пространства. Проанализируй фото комнаты и верни ТОЛЬКО валидный JSON на русском языке в следующем формате (без markdown, без \`\`\`):
+{
+  "roomType": "Тип комнаты (1-2 слова)",
+  "clutterLevel": число от 0 до 100,
+  "summary": "Краткое резюме состояния (1-2 предложения)",
+  "spaceUtilization": [
+    {"name": "Мебель", "value": число},
+    {"name": "Свободное место", "value": число},
+    {"name": "Хлам", "value": число}
+  ],
+  "actionItems": [
+    {
+      "id": "1",
+      "title": "Короткий заголовок",
+      "description": "Описание действия",
+      "difficulty": "Easy",
+      "category": "Discard"
+    }
+  ],
+  "aestheticSuggestions": ["Совет 1", "Совет 2"]
+}
+
+Важно:
+- difficulty может быть только: "Easy", "Medium", "Hard"
+- category может быть только: "Discard", "Organize", "Buy"
+- Все тексты на русском языке
+- Верни только JSON без дополнительного текста`;
+
     const response = await ai.models.generateContent({
       model: MODEL_NAME,
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: "image/jpeg",
-              data: base64Image
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: "image/jpeg",
+                data: base64Image
+              }
+            },
+            {
+              text: prompt
             }
-          },
-          {
-            text: "Роль: Профессиональный организатор. Задача: Проанализируй фото и дай четкий план действий. Язык: Строго Русский. Не добавляй переводы на английский. Не пиши свои мысли в JSON. Только финальный результат."
-          }
-        ]
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: analysisSchema,
-        // Жесткая системная инструкция для контроля поведения модели
-        systemInstruction: "Ты строгий JSON-генератор. Твоя задача - вернуть валидный JSON на русском языке. Запрещено: писать рассуждения (chain-of-thought) внутри строковых полей, добавлять английские переводы в скобках, добавлять префиксы вроде 'Description:'. Пиши кратко и по делу."
-      }
+          ]
+        }
+      ]
     });
 
-    if (!response.text) {
+    const responseText = response.text;
+
+    if (!responseText) {
       throw new Error("No response text received from Gemini");
     }
 
-    const rawData = JSON.parse(response.text) as RoomAnalysis;
+    const jsonString = extractJSON(responseText);
+    const rawData = JSON.parse(jsonString) as RoomAnalysis;
 
-    // Пост-обработка данных для гарантии чистоты текста
     const cleanData: RoomAnalysis = {
       ...rawData,
       roomType: cleanText(rawData.roomType),
@@ -123,36 +113,45 @@ export const analyzeRoomImage = async (base64Image: string): Promise<RoomAnalysi
     };
 
     return cleanData;
+
   } catch (error: any) {
     console.error("Error analyzing room:", error);
-    // Обработка ошибки региональных ограничений (распространено для новых моделей Gemini)
     if (error.toString().includes("Region not supported") || error.message?.includes("403")) {
-      throw new Error("Gemini API недоступен в вашем регионе. Пожалуйста, используйте VPN.");
+      throw new Error("Gemini API недоступен в вашем регионе (VPN может помочь).");
     }
     throw error;
   }
 };
 
-// Функция отправки сообщений в чат с контекстом истории
 export const sendChatMessage = async (
   history: GeminiContent[],
   newMessage: string,
   base64Image?: string
 ): Promise<string> => {
-  try {
-    const contents = [...history];
+  if (!apiKey) return "Ошибка: Нет API ключа";
 
-    const newParts: any[] = [{ text: newMessage }];
+  try {
+    const contents = history.map(msg => ({
+      role: msg.role,
+      parts: msg.parts.map(part => {
+        if (part.text) return { text: part.text };
+        if (part.inlineData) return { inlineData: part.inlineData };
+        return { text: '' };
+      })
+    }));
     
-    // Если есть изображение (обычно в первом сообщении), добавляем его в контекст
+    const newParts: any[] = [];
+    
     if (base64Image) {
-      newParts.unshift({
+      newParts.push({
         inlineData: {
           mimeType: "image/jpeg",
           data: base64Image
         }
       });
     }
+    
+    newParts.push({ text: newMessage });
 
     contents.push({
       role: 'user',
@@ -163,13 +162,13 @@ export const sendChatMessage = async (
       model: MODEL_NAME,
       contents: contents,
       config: {
-        systemInstruction: "Ты TidyAI. Отвечай кратко и только на русском языке. Не используй markdown разметку, если не просят."
+        systemInstruction: "Ты TidyAI - помощник по организации пространства. Отвечай кратко и только на русском языке."
       }
     });
 
     return response.text || "Извините, я не смог сгенерировать ответ.";
   } catch (error) {
     console.error("Chat error:", error);
-    return "Извините, произошла ошибка во время обработки. Возможно, сервис недоступен в вашем регионе.";
+    return "Произошла ошибка при обращении к AI.";
   }
 };
